@@ -1,20 +1,20 @@
 use std::str::CharIndices;
 
+#[derive(Debug, PartialEq, PartialOrd)]
 pub struct SpannedToken<'a> {
     pub token: Token<'a>,
     pub start: usize,
     pub end: usize,
 }
 
+#[derive(Debug, PartialEq, PartialOrd)]
 pub enum Token<'a> {
     Word(&'a str),
-    Flag(&'a str),
     String(&'a str),
     Pipe,
     RedirectOutput,
     RedirectAppend,
     RedirectInput,
-    RedirectIO(usize, usize),
     SemiColon,
     And,
     Or,
@@ -44,23 +44,6 @@ impl<'a> Iterator for TokenLexer<'a> {
         let mut end = 0;
         while let Some((start, c)) = self.input.next() {
             match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
-                    while let Some(&(i, c)) = self.input.peek() {
-                        match c {
-                            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
-                                end = i;
-                                self.input.next();
-                            }
-                            _ => break,
-                        }
-                    }
-
-                    return Some(SpannedToken {
-                        token: Token::Word(&self.string[start..=end]),
-                        start,
-                        end,
-                    });
-                }
                 '"' => {
                     while let Some(&(i, c)) = self.input.peek() {
                         match c {
@@ -98,13 +81,15 @@ impl<'a> Iterator for TokenLexer<'a> {
                     }
                 }
                 '%' => {
-                    let Some(&(i, c)) = self.input.peek() else {
+                    let Some(&(_, c)) = self.input.peek() else {
                         return None;
                     };
                     let end = match c {
                         '(' => ')',
                         '{' => '}',
                         '[' => ']',
+                        '<' => '>',
+                        c if c.is_alphanumeric() => return None,
                         c => c,
                     };
                     self.input.next();
@@ -114,7 +99,7 @@ impl<'a> Iterator for TokenLexer<'a> {
                             c if c == end => {
                                 self.input.next();
                                 return Some(SpannedToken {
-                                    token: Token::String(&self.string[start..=i]),
+                                    token: Token::String(&self.string[start + 2..=i - 1]),
                                     start,
                                     end: i,
                                 });
@@ -125,33 +110,14 @@ impl<'a> Iterator for TokenLexer<'a> {
                         }
                     }
                 }
-                '-' => {
-                    while let Some(&(i, c)) = self.input.peek() {
-                        match c {
-                            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => {
-                                end = i;
-                                self.input.next();
-                            }
-                            _ => break,
-                        }
-                    }
-
-                    return Some(SpannedToken {
-                        token: Token::Flag(&self.string[start..=end]),
-                        start,
-                        end,
-                    });
-                }
                 '|' => {
-                    if let Some(&(i, c)) = self.input.peek() {
-                        if c == '|' {
-                            self.input.next();
-                            return Some(SpannedToken {
-                                token: Token::Or,
-                                start,
-                                end: i,
-                            });
-                        }
+                    if let Some(&(i, '|')) = self.input.peek() {
+                        self.input.next();
+                        return Some(SpannedToken {
+                            token: Token::Or,
+                            start,
+                            end: i,
+                        });
                     } else {
                         return Some(SpannedToken {
                             token: Token::Pipe,
@@ -161,15 +127,13 @@ impl<'a> Iterator for TokenLexer<'a> {
                     }
                 }
                 '>' => {
-                    if let Some(&(i, c)) = self.input.peek() {
-                        if c == '>' {
-                            self.input.next();
-                            return Some(SpannedToken {
-                                token: Token::RedirectAppend,
-                                start,
-                                end: i,
-                            });
-                        }
+                    if let Some(&(i, '>')) = self.input.peek() {
+                        self.input.next();
+                        return Some(SpannedToken {
+                            token: Token::RedirectAppend,
+                            start,
+                            end: i,
+                        });
                     } else {
                         return Some(SpannedToken {
                             token: Token::RedirectOutput,
@@ -206,9 +170,166 @@ impl<'a> Iterator for TokenLexer<'a> {
                         return None;
                     }
                 }
-                _ => {}
+                c if c.is_whitespace() => {}
+                _ => {
+                    end = start;
+                    while let Some(&(i, c)) = self.input.peek() {
+                        if !c.is_whitespace() && c != '>' && c != '<'  {
+                            end = i;
+                            self.input.next();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    return Some(SpannedToken {
+                        token: Token::Word(&self.string[start..=end]),
+                        start,
+                        end,
+                    });
+                }
             }
         }
         None
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lexer() {
+        let input = "echo \"Hello, World!\" > output.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::RedirectOutput);
+        assert_eq!(tokens[3].token, Token::Word("output.txt"));
+    }
+
+    #[test]
+    fn test_lexer_fail() {
+        let input = "";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 0);
+    }
+
+    #[test]
+    fn test_lexer_redirect_io() {
+        let input = "echo \"Hello, World!\" 2> output.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::Word("2"));
+        assert_eq!(tokens[3].token, Token::RedirectOutput);
+        assert_eq!(tokens[4].token, Token::Word("output.txt"));
+    }
+
+    #[test]
+    fn test_special_string() {
+        let input = "echo %{Hello, World!} > output.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::RedirectOutput);
+        assert_eq!(tokens[3].token, Token::Word("output.txt"));
+    }
+
+    #[test]
+    fn test_pipe() {
+        let input = "echo \"Hello, World!\" | grep World";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::Pipe);
+        assert_eq!(tokens[3].token, Token::Word("grep"));
+        assert_eq!(tokens[4].token, Token::Word("World"));
+    }
+
+    #[test]
+    fn test_and() {
+        let input = "echo \"Hello, World!\" && echo \"Hello, World!\"";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::And);
+        assert_eq!(tokens[3].token, Token::Word("echo"));
+        assert_eq!(tokens[4].token, Token::String("Hello, World!"));
+    }
+
+    #[test]
+    fn test_or() {
+        let input = "echo \"Hello, World!\" || echo \"Hello, World!\"";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::Or);
+        assert_eq!(tokens[3].token, Token::Word("echo"));
+        assert_eq!(tokens[4].token, Token::String("Hello, World!"));
+    }
+
+    #[test]
+    fn test_semi_colon() {
+        let input = "echo \"Hello, World!\"; echo \"Hello, World!\"";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::SemiColon);
+        assert_eq!(tokens[3].token, Token::Word("echo"));
+        assert_eq!(tokens[4].token, Token::String("Hello, World!"));
+    }
+
+    #[test]
+    fn test_redirect_append() {
+        let input = "echo \"Hello, World!\" >> output.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::RedirectAppend);
+        assert_eq!(tokens[3].token, Token::Word("output.txt"));
+    }
+
+    #[test]
+    fn test_redirect_input() {
+        let input = "echo \"Hello, World!\" < input.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::RedirectInput);
+        assert_eq!(tokens[3].token, Token::Word("input.txt"));
+    }
+
+    #[test]
+    fn test_redirect_output() {
+        let input = "echo \"Hello, World!\" > output.txt";
+        let lexer = TokenLexer::new(input);
+        let tokens: Vec<_> = lexer.collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token, Token::Word("echo"));
+        assert_eq!(tokens[1].token, Token::String("Hello, World!"));
+        assert_eq!(tokens[2].token, Token::RedirectOutput);
+        assert_eq!(tokens[3].token, Token::Word("output.txt"));
+    }
+}
+
